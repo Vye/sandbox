@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -x
+
+# This script is used to clean up old GoCD workspaces. GoCD does allow cleanup *before* a job runs, but not after.
+# Workspaces linger between pipeline executions and when pipelines are renamed or deleted.
+# The feature was requested but the issue was closed after no activity and not implemented: https://github.com/gocd/gocd/issues/4316
+
+# How it works:
+# 1. Find all GoCD workspaces in /var/lib/go-agent*/pipelines/
+#      The wildcard after "go-agent" is to support running multiple agents on a single server.
+#      https://github.com/gocd/gocd/blob/master/installers/go-agent/release/README-running-multiple-agents.md
+# 2. If any file or directory in the workspace (recursive) has been modified in the last 24 hours, skip it.
+# 3. If the workspace has not been modified in the last 24 hours, delete it.
+# 4. Print how much disk space was reclaimed.
+
+# Example output:
+#   would delete /var/lib/go-agent-4/pipelines/WaygateDeployDev
+#   would delete /var/lib/go-agent-4/pipelines/WaygateDeployTst
+#   ...
+#   space reclaimed: 4666 MB
+
+# Install instructions:
+# copy to /etc/cron.daily/gocd-workspace-cleanup.cron
+# test run with `bash /etc/cron.daily/gocd-workspace-cleanup.cron`
+# Set dry_run to false to enable with `sed -i 's/dry_run=true/dry_run=false/' /etc/cron.daily/gocd-workspace-cleanup.cron`
+# set execution permissions with `chmod +x /etc/cron.daily/gocd-workspace-cleanup.cron`
+
+freed_kb=0
+dry_run=true   # Set to false to enable
+
+# Get working directory list
+# - Using find instead of ls for absolute path
+# - `-maxdepth 3` and `-type d` so only parent directory is returned
+# - -wholename allows use of multiple wildcards without nested for loops
+# - Redirect find stderr to stdout so we can ignore permission denied errors
+workdirs=$(find /var/lib -maxdepth 3 -wholename "/var/lib/go-agent*/pipelines/*" -type d 2>&1 | grep -v "Permission denied")
+if [ -z "$workdirs" ]; then
+   echo "No workdirs found"
+   exit 1
+fi
+
+for workdir in $workdirs; do
+   if [[ ! -z $(find $workdir -mtime -1) ]]; then
+     # Append directory size to freed counter
+     # cut -f 1 to return kb and not dir path
+     freed_kb=$(($freed_kb+$(du -s $workdir | cut -f 1)))
+     if [ $dry_run == "false" ]; then
+         rm -r "$workdir" || echo "error deleting $workdir" >&2
+         echo "deleted $workdir"
+     else
+         echo "would delete $workdir"
+     fi
+   fi
+done
+
+echo "space reclaimed: $(($freed_kb/1024)) MB"
+exit 0
